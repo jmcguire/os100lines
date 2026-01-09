@@ -1,0 +1,31 @@
+typedef unsigned char uint8_t;
+typedef unsigned int uint32_t;
+typedef uint32_t size_t;
+
+extern char __bss[], __bss_end[], __stack_top[];
+
+void *memset(void *buf, char c, size_t n) {
+  uint8_t *p = (uint8_t *) buf;
+  while (n--)
+    *p++ = c;
+  return buf;
+}
+
+void kernel_main(void) {
+  memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
+
+  for (;;);
+}
+
+// this is the entry point (because of kernel.ls)
+__attribute__((section(".text.boot"))) // tells compile where to put this function in the linker
+__attribute__((naked)) // tells compiler to not generate unnessessary code around this function
+void boot(void) {
+  __asm__ __volatile__(
+    "mv sp, %[stack_top]\n" // set the stack pointer
+    "j kernel_main\n" // jump to the kernel_main function
+    :
+    : [stack_top] "r" (__stack_top) // pass the stack top address as %[stack_top]
+  );
+}
+
