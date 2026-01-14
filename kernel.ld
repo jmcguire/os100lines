@@ -33,5 +33,11 @@ SECTIONS {
   . = ALIGN(4);
   . += 126 + 1024; /* 128KB  for the kernel stack */
   __stack_top = .;
+
+  /* some space for the memory allocator */
+  . = ALIGN(4096); /* in 4k chunks, which is a typical page size */
+  __free_ram = .;
+  . += 64 * 1024 * 1024; /* 64MB */
+  __free_ram_end = .;
 }
 
