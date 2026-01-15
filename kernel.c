@@ -7,6 +7,54 @@ typedef uint32_t size_t;
 
 extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[], __free_ram_end[];
+extern char __kernel_base[];
+
+/* Memory allocation
+ *
+ */
+
+paddr_t alloc_pages(uint32_t n) {
+  static paddr_t next_paddr = (paddr_t) __free_ram;
+  paddr_t paddr = next_paddr;
+  next_paddr += n * PAGE_SIZE;
+
+  if (next_paddr > (paddr_t) __free_ram_end)
+    PANIC("out of memory");
+
+  memset((void *) paddr, 0, n * PAGE_SIZE);
+  return paddr;
+}
+
+/* Page tables
+ *
+ */
+
+// pages in RISC-V use a two level page table
+// an 32 bit address has 10 bits for the vpn1, 10 bits for vpn0 (2nd level is 0), and 12 bits offset to a final address
+// vpn is virtual private something
+// table1 is a table of all first level pages
+// this whole function ensures the first level page exists, and sets the second level talbe entry to map to a physical page
+void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
+  if (!is_aligned(vaddr, PAGE_SIZE))
+    PANIC("unaligned vaddr %x", vaddr);
+
+  if (!is_aligned(paddr, PAGE_SIZE))
+    PANIC("unaligned paddr %x", paddr);
+
+  // create the 1st level page if it doesn't exist
+  uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
+  if ((table1[vpn1] & PAGE_V) == 0) {
+    uint32_t pt_paddr = alloc_pages(1); // this creates one page and returns the starting point
+    table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
+  }
+
+  // set the 2nd level table to map to the physical page
+  uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
+  uint32_t *table0 = (uint32_t *) ((table1[vpn1] >> 10) * PAGE_SIZE);
+  table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
+  // table0 is a pointer into the memory area that table1.vpn1 *PAGESIZE points to
+  // table1[n] n is just a number, then each size of that number is PAGE_SIZE
+}
 
 /* Context switching
  *
@@ -55,7 +103,7 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp, uint32_t *next_sp)
   );
 }
 
-struct process procs[PROCS_MAX]; // all the process controls structures
+struct process procs[PROCS_MAX]; // all the process control structures
 struct process *create_process(uint32_t pc) {
   // find an unused process control structure (each one represents a process, whether in use or free)
   struct process *proc = NULL;
@@ -86,10 +134,18 @@ struct process *create_process(uint32_t pc) {
   *--sp = 0; // s0
   *--sp = (uint32_t) pc; // ra
 
+  // map kernel pages
+  uint32_t *page_table = (uint32_t *) alloc_pages(1);
+  for (paddr_t paddr = (paddr_t) __kernel_base;
+      paddr < (paddr_t) __free_ram_end;
+      paddr+= PAGE_SIZE)
+    map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+
   // init fields
   proc->pid = i+1;
   proc->state = PROC_RUNNABLE;
   proc->sp = (uint32_t) sp;
+  proc->page_table = page_table;
 
   return proc;
 }
@@ -116,30 +172,18 @@ void yield(void) {
   // otherwise do a context switch
   // but first save info for the exception handler
   __asm__ __volatile__(
+    "sfence.vma\n"
+    "csrw satp, %[satp]\n"
+    "sfence.vma\n"
     "csrw sscratch, %[sscratch]\n"
     :
-    : [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
+    : [satp] "r" (SATP_SV32 | ((uint32_t) next->page_table / PAGE_SIZE)),
+      [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
   );
 
   struct process *prev = current_proc;
   current_proc = next;
   switch_context(&prev->sp, &next->sp);
-}
-
-/* Memory allocation
- *
- */
-
-paddr_t alloc_pages(uint32_t n) {
-  static paddr_t next_paddr = (paddr_t) __free_ram;
-  paddr_t paddr = next_paddr;
-  next_paddr += n * PAGE_SIZE;
-
-  if (next_paddr > (paddr_t) __free_ram_end)
-    PANIC("out of memory");
-
-  memset((void *) paddr, 0, n * PAGE_SIZE);
-  return paddr;
 }
 
 /* everyting else, unsorted
@@ -183,7 +227,7 @@ struct process *proc_b;
 
 void proc_a_entry(void) {
   printf("starting process A\n");
-  while (1) {
+  for (int i = 0; i < 10; i++) {
     putchar('A');
     yield();
     delay();
@@ -192,7 +236,7 @@ void proc_a_entry(void) {
 
 void proc_b_entry(void) {
   printf("starting process B\n");
-  while (1) {
+  for (int i = 0; i < 10; i++) {
     putchar('B');
     yield();
     delay();
