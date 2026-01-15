@@ -83,3 +83,9 @@ struct process {
 #define PAGE_X (1 << 3) // executable
 #define PAGE_U (1 << 4) // user-accessible
 
+// user mode
+// base address of an application image (matche user.ld)
+#define USER_BASE 0x1000000
+// the flag that says switch to user mode
+#define SSTATUS_SPIE (1<<5)
+

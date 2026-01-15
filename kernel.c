@@ -9,6 +9,23 @@ extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[], __free_ram_end[];
 extern char __kernel_base[];
 
+/* User Mode
+ *
+ */
+
+extern char _binary_shell_bin_start[], _binary_shell_bin_size[];
+
+__attribute__((naked)) void user_entry(void) {
+  __asm__ __volatile__(
+    "csrw sepc, %[sepc]\n"
+    "csrw sstatus, %[sstatus]\n"
+    "sret\n"
+    :
+    : [sepc] "r" (USER_BASE),
+      [sstatus] "r" (SSTATUS_SPIE)
+  );
+}
+
 /* Memory allocation
  *
  */
@@ -65,7 +82,7 @@ void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
 __attribute__((naked)) void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
   __asm__ __volatile__(
     // save callee-saved registers in the current processes stack
-    "addi sp, sp, 13 * 4\n" // allocate 13 4-bytes registers
+    "addi sp, sp, -13 * 4\n" // allocate 13 4-bytes registers
     "sw ra, 0 * 4(sp)\n"
     "sw s0, 1 * 4(sp)\n"
     "sw s1, 2 * 4(sp)\n"
@@ -98,13 +115,13 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp, uint32_t *next_sp)
     "lw s9, 10 * 4(sp)\n"
     "lw s10, 11 * 4(sp)\n"
     "lw s11, 12 * 4(sp)\n"
-    "addi sp, sp, 13*4\n" // we've popped 13 4-byte registers from the stack
+    "addi sp, sp, 13 * 4\n" // we've popped 13 4-byte registers from the stack
     "ret\n"
   );
 }
 
 struct process procs[PROCS_MAX]; // all the process control structures
-struct process *create_process(uint32_t pc) {
+struct process *create_process(const void *image, size_t image_size) {
   // find an unused process control structure (each one represents a process, whether in use or free)
   struct process *proc = NULL;
   int i;
@@ -132,14 +149,28 @@ struct process *create_process(uint32_t pc) {
   *--sp = 0; // s2
   *--sp = 0; // s1
   *--sp = 0; // s0
-  *--sp = (uint32_t) pc; // ra
+  *--sp = (uint32_t) user_entry; // ra
+
+  uint32_t *page_table = (uint32_t *) alloc_pages(1);
 
   // map kernel pages
-  uint32_t *page_table = (uint32_t *) alloc_pages(1);
   for (paddr_t paddr = (paddr_t) __kernel_base;
       paddr < (paddr_t) __free_ram_end;
-      paddr+= PAGE_SIZE)
+      paddr += PAGE_SIZE)
     map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+
+  // map user pages
+  for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
+    paddr_t page = alloc_pages(1);
+
+    // eventually the data left to map will be smaller that a page
+    size_t remaining = image_size - off;
+    size_t copy_size = PAGE_SIZE <= remaining ? PAGE_SIZE : remaining;
+
+    // fill and map the page
+    memcpy((void *) page, image + off, copy_size);
+    map_page(page_table, USER_BASE + off, page, PAGE_U | PAGE_R | PAGE_W | PAGE_X);
+  }
 
   // init fields
   proc->pid = i+1;
@@ -183,6 +214,7 @@ void yield(void) {
 
   struct process *prev = current_proc;
   current_proc = next;
+
   switch_context(&prev->sp, &next->sp);
 }
 
@@ -306,6 +338,10 @@ void kernel_entry(void) {
         "addi a0, sp, 4 * 31\n"
         "csrw sscratch, a0\n"
 
+        // handle exception
+        "mv a0, sp\n"
+        "call handle_trap\n"
+
         "lw ra,  4 * 0(sp)\n"
         "lw gp,  4 * 1(sp)\n"
         "lw tp,  4 * 2(sp)\n"
@@ -347,7 +383,7 @@ void kernel_main(void) {
   WRITE_CSR(stvec, (uint32_t) kernel_entry);
 
   // create the idle process, which is a nothing
-  idle_proc = create_process((uint32_t) NULL);
+  idle_proc = create_process(NULL, 0);
   idle_proc->pid = 0;
   current_proc = idle_proc;
 
@@ -370,16 +406,15 @@ void kernel_main(void) {
   paddr_t paddr1 = alloc_pages(1);
   printf("allog_pages test: paddr0=%x\n", paddr0);
   printf("allog_pages test: paddr1=%x\n", paddr1);
-  */
 
   proc_a = create_process((uint32_t) proc_a_entry);
   proc_b = create_process((uint32_t) proc_b_entry);
+  */
+
+  create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
+
   yield();
   PANIC("switched to idle process");
-
-  // this is always at the end, it say to just keep goin forver
-  for (;;)
-    __asm__ __volatile__("wfi");
 }
 
 // this is the entry point (because of kernel.ls)
