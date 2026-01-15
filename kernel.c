@@ -8,6 +8,128 @@ typedef uint32_t size_t;
 extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[], __free_ram_end[];
 
+/* Context switching
+ *
+ */
+
+/* s0-s11 are call-saved registers, other registers like a0 are caller-saved,
+   so switch context only needs to handle the callee-saved */
+__attribute__((naked)) void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
+  __asm__ __volatile__(
+    // save callee-saved registers in the current processes stack
+    "addi sp, sp, 13 * 4\n" // allocate 13 4-bytes registers
+    "sw ra, 0 * 4(sp)\n"
+    "sw s0, 1 * 4(sp)\n"
+    "sw s1, 2 * 4(sp)\n"
+    "sw s2, 3 * 4(sp)\n"
+    "sw s3, 4 * 4(sp)\n"
+    "sw s4, 5 * 4(sp)\n"
+    "sw s5, 6 * 4(sp)\n"
+    "sw s6, 7 * 4(sp)\n"
+    "sw s7, 8 * 4(sp)\n"
+    "sw s8, 9 * 4(sp)\n"
+    "sw s9, 10 * 4(sp)\n"
+    "sw s10, 11 * 4(sp)\n"
+    "sw s11, 12 * 4(sp)\n"
+
+    // switch the stack pointer
+    "sw sp, (a0)\n" // prev_sp - sp
+    "lw sp, (a1)\n" // switch sp to here
+
+    // restore callee-saved registers from the next processes stack
+    "lw ra, 0 * 4(sp)\n"
+    "lw s0, 1 * 4(sp)\n"
+    "lw s1, 2 * 4(sp)\n"
+    "lw s2, 3 * 4(sp)\n"
+    "lw s3, 4 * 4(sp)\n"
+    "lw s4, 5 * 4(sp)\n"
+    "lw s5, 6 * 4(sp)\n"
+    "lw s6, 7 * 4(sp)\n"
+    "lw s7, 8 * 4(sp)\n"
+    "lw s8, 9 * 4(sp)\n"
+    "lw s9, 10 * 4(sp)\n"
+    "lw s10, 11 * 4(sp)\n"
+    "lw s11, 12 * 4(sp)\n"
+    "addi sp, sp, 13*4\n" // we've popped 13 4-byte registers from the stack
+    "ret\n"
+  );
+}
+
+struct process procs[PROCS_MAX]; // all the process controls structures
+struct process *create_process(uint32_t pc) {
+  // find an unused process control structure (each one represents a process, whether in use or free)
+  struct process *proc = NULL;
+  int i;
+  for(i = 0; i < PROCS_MAX; i++) {
+    if(procs[i].state == PROC_UNUSED) {
+      proc = &procs[i];
+      break;
+    }
+  }
+
+  if (!proc)
+    PANIC("no free process slots");
+
+  // stack call-saved registers
+  uint32_t *sp = (uint32_t *) &proc->stack[sizeof(proc->stack)];
+  *--sp = 0; // s11
+  *--sp = 0; // s10
+  *--sp = 0; // s9
+  *--sp = 0; // s8
+  *--sp = 0; // s7
+  *--sp = 0; // s6
+  *--sp = 0; // s5
+  *--sp = 0; // s4
+  *--sp = 0; // s3
+  *--sp = 0; // s2
+  *--sp = 0; // s1
+  *--sp = 0; // s0
+  *--sp = (uint32_t) pc; // ra
+
+  // init fields
+  proc->pid = i+1;
+  proc->state = PROC_RUNNABLE;
+  proc->sp = (uint32_t) sp;
+
+  return proc;
+}
+
+struct process *current_proc;
+struct process *idle_proc;
+
+void yield(void) {
+  struct process *next = idle_proc;
+
+  // find a runnable process
+  for (int i = 0; i < PROCS_MAX; i++) {
+    struct process *proc = &procs[(current_proc->pid +i) % PROCS_MAX];
+    if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
+      next = proc;
+      break;
+    }
+  }
+
+  // if no other process are available just keep running the current
+  if (next == current_proc)
+    return;
+
+  // otherwise do a context switch
+  // but first save info for the exception handler
+  __asm__ __volatile__(
+    "csrw sscratch, %[sscratch]\n"
+    :
+    : [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
+  );
+
+  struct process *prev = current_proc;
+  current_proc = next;
+  switch_context(&prev->sp, &next->sp);
+}
+
+/* Memory allocation
+ *
+ */
+
 paddr_t alloc_pages(uint32_t n) {
   static paddr_t next_paddr = (paddr_t) __free_ram;
   paddr_t paddr = next_paddr;
@@ -19,6 +141,10 @@ paddr_t alloc_pages(uint32_t n) {
   memset((void *) paddr, 0, n * PAGE_SIZE);
   return paddr;
 }
+
+/* everyting else, unsorted
+ *
+ */
 
 // call the OpenSBI, that is autmatically loaded with qemu, which is an API to the hardware
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4, long arg5, long fid, long eid) {
@@ -42,11 +168,60 @@ void putchar(char ch) {
   sbi_call(ch, 0, 0, 0, 0, 0, 0, 1); // Console PutChar, which is defined in the OpenSBI
 }
 
+/* setup some process testing
+ *
+ */
+
+// do nothing for a while
+void delay(void) {
+  for (int i = 0; i < 30000000; i++)
+    __asm__ __volatile__("nop");
+}
+
+struct process *proc_a;
+struct process *proc_b;
+
+void proc_a_entry(void) {
+  printf("starting process A\n");
+  while (1) {
+    putchar('A');
+    yield();
+    delay();
+  }
+}
+
+void proc_b_entry(void) {
+  printf("starting process B\n");
+  while (1) {
+    putchar('B');
+    yield();
+    delay();
+  }
+}
+
+/* handle exceptions/traps
+ *
+ */
+
+void handle_trap(struct trap_frame *f __attribute((unused))) {
+  uint32_t scause  = READ_CSR(scause);
+  uint32_t stval   = READ_CSR(stval);
+  uint32_t user_pc = READ_CSR(sepc);
+
+  PANIC("unexpected trap scause=%x, stval=%x, sepc=%x", scause, stval, user_pc);
+}
+
+/* the kernel entry points
+ *
+ */
+
 __attribute__((naked))
 __attribute__((aligned(4)))
 void kernel_entry(void) {
     __asm__ __volatile__(
-        "csrw sscratch, sp\n"
+        // get the kernel stack of the running process from sscratch (which is a nice place to store pointers)
+        "csrrw sp, sscratch, sp\n"
+
         "addi sp, sp, -4 * 31\n"
         "sw ra,  4 * 0(sp)\n"
         "sw gp,  4 * 1(sp)\n"
@@ -79,11 +254,13 @@ void kernel_entry(void) {
         "sw s10, 4 * 28(sp)\n"
         "sw s11, 4 * 29(sp)\n"
 
+        // get and save sp at time of exception
         "csrr a0, sscratch\n"
         "sw a0, 4 * 30(sp)\n"
 
-        "mv a0, sp\n"
-        "call handle_trap\n"
+        // reset kernel stack
+        "addi a0, sp, 4 * 31\n"
+        "csrw sscratch, a0\n"
 
         "lw ra,  4 * 0(sp)\n"
         "lw gp,  4 * 1(sp)\n"
@@ -120,21 +297,21 @@ void kernel_entry(void) {
     );
 }
 
-void handle_trap(struct trap_frame *f) {
-  uint32_t scause  = READ_CSR(scause);
-  uint32_t stval   = READ_CSR(stval);
-  uint32_t user_pc = READ_CSR(sepc);
-
-  PANIC("unexpected trap scause=%x, stval=%x, sepc=%x", scause, stval, user_pc);
-}
-
 void kernel_main(void) {
+  // set up the kernel memory and registers
   memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
-
   WRITE_CSR(stvec, (uint32_t) kernel_entry);
 
-  // __asm__ __volatile__("unimp"); // a pseudo-instruction that trigger  an illegal instruction exception
-  // ERROR: this is returns an stval of 0, it should be filled with the illegal instruction?
+  // create the idle process, which is a nothing
+  idle_proc = create_process((uint32_t) NULL);
+  idle_proc->pid = 0;
+  current_proc = idle_proc;
+
+  // now a bunch of test code
+
+  /*
+  __asm__ __volatile__("unimp"); // a pseudo-instruction that trigger  an illegal instruction exception
+  ERROR: this is returns an stval of 0, it should be filled with the illegal instruction?
 
   const char *s = "\n\nHello World!\n";
   for (int i = 0; s[i] != '\0'; i++)
@@ -143,13 +320,20 @@ void kernel_main(void) {
   printf("\n\nHello %s\n", "World!");
   printf("1 + 2 = %d, %x\n", 1+2, 0x1234abcd);
 
-  //PANIC("booted", "helo");
+  PANIC("booted", "helo");
 
   paddr_t paddr0 = alloc_pages(2);
   paddr_t paddr1 = alloc_pages(1);
   printf("allog_pages test: paddr0=%x\n", paddr0);
   printf("allog_pages test: paddr1=%x\n", paddr1);
+  */
 
+  proc_a = create_process((uint32_t) proc_a_entry);
+  proc_b = create_process((uint32_t) proc_b_entry);
+  yield();
+  PANIC("switched to idle process");
+
+  // this is always at the end, it say to just keep goin forver
   for (;;)
     __asm__ __volatile__("wfi");
 }

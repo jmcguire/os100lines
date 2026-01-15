@@ -62,3 +62,14 @@ struct trap_frame {
     __asm__ __volatile__("csrw " #reg ", %0" :: "r"(__tmp)); \
   } while (0)
 
+// process controls
+#define PROCS_MAX 8
+#define PROC_UNUSED 0
+#define PROC_RUNNABLE 1
+
+struct process {
+  int pid;             // process id
+  int state;           // PROC_UNUSED or PROC_RUNNABLE
+  vaddr_t sp;          // stack pointer
+  uint8_t stack[8192]; // kernel stack, to save and restore registers, and the return address
+};
