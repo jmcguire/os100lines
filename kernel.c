@@ -244,6 +244,11 @@ void putchar(char ch) {
   sbi_call(ch, 0, 0, 0, 0, 0, 0, 1); // Console PutChar, which is defined in the OpenSBI
 }
 
+long getchar(void) {
+  struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+  return ret.error;
+}
+
 /* setup some process testing
  *
  */
@@ -279,12 +284,46 @@ void proc_b_entry(void) {
  *
  */
 
-void handle_trap(struct trap_frame *f __attribute((unused))) {
+void handle_syscall(struct trap_frame *f) {
+  switch (f->a3) {
+    case SYS_PUTCHAR:
+      putchar(f->a0);
+      break;
+    case SYS_GETCHAR:
+      while (1) {
+        long ch = getchar();
+        if (ch >= 0) {
+          f->a0 = ch;
+          break;
+        }
+        yield();
+        // we keep reading from SBI until a char is read, but we let other processes run inbetween those reads
+      }
+      break;
+    case SYS_EXIT:
+      printf("process %d exited\n", current_proc->pid);
+      current_proc->state = PROC_EXITED;
+      yield();
+      PANIC("unreachable after exit");
+    default:
+      PANIC("unexpected syscall a3=%x\n", f->a3);
+  }
+}
+
+void handle_trap(struct trap_frame *f) {
   uint32_t scause  = READ_CSR(scause);
   uint32_t stval   = READ_CSR(stval);
   uint32_t user_pc = READ_CSR(sepc);
+  if (scause == SCAUSE_ECALL) {
+    // sometimes traps are for user mode to call into system functions
+    handle_syscall(f);
+    user_pc += 4;
+  } else {
+    printf("SCAUSE_ECALL: %x\n", SCAUSE_ECALL);
+    PANIC("unexpected trap scause=%x, stval=%x, sepc=%x", scause, stval, user_pc);
+  }
 
-  PANIC("unexpected trap scause=%x, stval=%x, sepc=%x", scause, stval, user_pc);
+  WRITE_CSR(sepc, user_pc);
 }
 
 /* the kernel entry points
@@ -411,6 +450,7 @@ void kernel_main(void) {
   proc_b = create_process((uint32_t) proc_b_entry);
   */
 
+  printf("start: %x, size: %x\n", _binary_shell_bin_start, _binary_shell_bin_size);
   create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
 
   yield();

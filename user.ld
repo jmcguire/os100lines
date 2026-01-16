@@ -5,7 +5,7 @@ SECTIONS {
 
   /* machine code */
   .text :{
-    KEEP(*(.text.stast));
+    KEEP(*(.text.start));
     *(.text .text.*);
   }
 
